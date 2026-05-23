@@ -1,0 +1,646 @@
+---
+title: "R Code for JSSAM Submission"
+author: "Qichuan Zhou"
+date: "2026-05-10"
+output: word_document
+---
+
+```{r setup, include=FALSE, tidy=TRUE}
+knitr::opts_chunk$set(echo = TRUE,cache=TRUE, 
+                      autodep=TRUE, cache.comments=FALSE,
+                      message=FALSE, warning=FALSE,
+                      fig.width=4.5, fig.height=3)
+```
+
+# 1, Data Import
+
+```{r}
+library(tidyverse)
+library(haven)
+library(survey)
+library(srvyr)
+library(kableExtra)
+library(flextable)
+library(officer)
+```
+
+```{r}
+data <- read_dta("D:/2025 Winter/SurvMeth 721 Total Survey Error and Data Quality II/Paper Data/ICPSR_2016_Post_Election/ICPSR_37380/DS0001/37380-0001-Data.dta")
+```
+
+# 2, Data Cleaning and Preprocessing
+
+## Create age categories
+
+```{r}
+data$Q10_18 <- ifelse(data$Q10_18 %in% c(8888, 9999), NA, data$Q10_18) # Converting 8888 and 9999 in the original age variable to NA
+data$AGE <- ifelse(!is.na(data$Q10_18), 2017 - data$Q10_18, NA)
+data$AGE_CAT <- cut(
+         data$AGE,
+         breaks = c(-Inf, 24, 34, 49, 64, Inf),
+         labels = c("18-24", "25-34", "35-49", "50-64", "65 or higher"), 
+         right = TRUE 
+) # Creating age categories
+```
+
+## Dealing with control variables
+
+```{r}
+data$Q10_4A <- ifelse(data$Q10_4A %in% c(88, 99), NA, data$Q10_4A) # marital status
+data$Q10_4A[data$Q10_4A == 6] <- 4
+
+data$Q10_901 <- ifelse(data$Q10_901 %in% c(88, 99), NA, data$Q10_901) # employment status
+data <- data %>%
+  mutate(Q10_901_recode = case_when(
+    Q10_901 %in% c(1, 2, 3) ~ 1,  # Currently Employed
+    Q10_901 %in% c(4, 5)    ~ 2,  # Currently Unemployed
+    Q10_901 == 6            ~ 3,  # Student
+    Q10_901 == 7            ~ 4,  # Homemaker
+    Q10_901 == 8            ~ 5,  # Retired
+    Q10_901 %in% c(9, 10)   ~ 6   # Permanently Disabled and Other
+  ))
+class(data$Q10_901_recode)
+
+data$S7 <- ifelse(data$S7 == 2, 0, 1) # turning gender from 1/2 to 1/0
+data$S9 <- ifelse(data$S9 == 2, 0, 1) # turning if US born from 1/2 to 1/0
+
+# Recode Asian ethnicities
+data <- data %>%
+  mutate(S10_1_recode = case_when(
+    S10_1 %in% c(2, 3, 4, 5, 7, 8, 11) ~ 1,  # East/Southeast Asian
+    S10_1 %in% c(1, 6, 10) ~ 2,  # South Asian
+    TRUE ~ 3, # Other Asian   
+  ))  
+
+```
+
+## Dealing with AA in hiring variables
+
+```{r}
+data$AA_hire_ind <- ifelse(!is.na(data$Q7_1A), 1,
+                           ifelse(!is.na(data$Q7_1B), 2,
+                                  ifelse(!is.na(data$Q7_1C), 3, NA))) # Create a AA hiring question indicator
+
+data$AA_hire_response <- ifelse(!is.na(data$Q7_1A), data$Q7_1A,
+                                ifelse(!is.na(data$Q7_1B), data$Q7_1B,
+                                       ifelse(!is.na(data$Q7_1C), data$Q7_1C, NA))) # Merge three AA hiring question responses to one
+
+data$AA_hire_response <- ifelse(data$AA_hire_response == 88, 2, # Change 88 to 2 (neutral)
+                                ifelse(data$AA_hire_response == 2, 3, # Change 2 to 3 (against)
+                                       ifelse(data$AA_hire_response == 99, NA, # Change 99 to NA
+                                              data$AA_hire_response)))   # After transformation, 1:For;2:Neutral; 3:Against
+
+```
+
+## Dealing with AA in education variables
+
+```{r}
+data$AA_educ_ind <- ifelse(!is.na(data$Q7_3A) | !is.na(data$Q7_3C), 1,
+                           ifelse(!is.na(data$Q7_3B) | !is.na(data$Q7_3D), 2, NA)) # Create a AA education question indicator
+
+data$AA_educ_response <- ifelse(!is.na(data$Q7_3A), data$Q7_3A,
+                                ifelse(!is.na(data$Q7_3B), data$Q7_3B,
+                                       ifelse(!is.na(data$Q7_3C), data$Q7_3C,
+                                              ifelse(!is.na(data$Q7_3D), data$Q7_3D, NA)))) # Merge tour AA education question resposnes to one
+
+data$AA_educ_response <- ifelse(data$AA_educ_response %in% c(88, 99), NA, data$AA_educ_response) # Turn 88 and 99 to NA
+
+```
+
+## Two ways of dealing with interviewer race
+
+```{r}
+# int_race is a binary variabe with 1 for Asian, 0 for non-Asian
+asian_cat <- c(1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 17, 21, 22, 34)
+data$int_race <- ifelse(data$Q11_5 %in% asian_cat, 1, 0)
+
+# int_race2 is a nominal variable with 1 for Asian, 2 for White, 3 for Black, 4 for Hispanic, and 5 for Other (Native American and Pacific Islander and Multiracials)
+data$int_race2 <- case_when(
+  data$Q11_5 %in% c(1,2,3,4,5,6,7,8,10, 11, 17) ~ 1, # Asian
+  data$Q11_5 == 31 ~ 2, # White
+  data$Q11_5 == 32 ~ 3, # Black
+  data$Q11_5 == 33 ~ 4, # Hispanic
+  TRUE ~ 5 # Other
+)
+
+```
+
+## Dealing with everyday discrimination variables
+
+```{r}
+data[, c("Q5_1_B", "Q5_1_E", "Q5_1_D", "Q5_1_G", "Q5_1_H", "Q5_1_J", "Q5_1_K", "Q5_1_C", "Q5_1_I")] <- 
+  lapply(data[, c("Q5_1_B", "Q5_1_E", "Q5_1_D", "Q5_1_G", "Q5_1_H", "Q5_1_J", "Q5_1_K", "Q5_1_C", "Q5_1_I")], function(x) {
+    ifelse(x %in% c(88, 99), NA, x)
+  })  # Convert 88 and 99 in these discrimination variables to NA
+
+data[, c("Q5_1_B", "Q5_1_E", "Q5_1_D", "Q5_1_G", "Q5_1_H", "Q5_1_J", "Q5_1_K", "Q5_1_C", "Q5_1_I")] <- 
+  lapply(data[, c("Q5_1_B", "Q5_1_E", "Q5_1_D", "Q5_1_G", "Q5_1_H", "Q5_1_J", "Q5_1_K", "Q5_1_C", "Q5_1_I")], function(x) {
+    ifelse(x == 2, 0, x)
+  }) # Convert No response from 2 to 0
+
+```
+
+## Dealing with Intergroup Contact variables
+
+```{r}
+data[, c("Q6_1_A", "Q6_1_B", "Q6_1_C")] <- 
+  lapply(data[, c("Q6_1_A", "Q6_1_B", "Q6_1_C")], function(x) {
+    ifelse(x %in% c(88, 99), NA, x)
+  }) # Convert 88 and 99 in these variables to NA
+
+```
+
+## Select all the necessary variables related to this research
+
+```{r}
+selected_vars <- c(
+  # Everyday Discrimination variables
+  "Q5_1_B", "Q5_1_C", "Q5_1_D", "Q5_1_E", "Q5_1_G", "Q5_1_H", "Q5_1_I", "Q5_1_J", "Q5_1_K",
+  
+  # Affirmative Action responses
+  "AA_hire_response", "AA_educ_response",
+  
+  # Interviewer Race (Binary and Dummy-coded)
+  "int_race", "int_race2",
+  
+  # Intergroup Contact (Ordinal)
+  "Q6_1_A", "Q6_1_B", "Q6_1_C",
+  
+  # Control Variables
+  "AGE_CAT", "Q10_4A", "Q10_901_recode",
+  "S7", "S8", "S10_1_recode", "FORBORN",
+  
+  # Question Framing Indicators (Dummy-coded)
+  "AA_hire_ind", "AA_educ_ind",
+  
+  # Respondent Race
+  "RACE", 
+  
+  # Weight
+  "NWEIGHTNATIVITY",
+  
+  #STRATA Indicator
+  "ETHNICALPHA"
+)
+
+data2 <- data[, selected_vars]
+
+
+# Setting the reference category
+data2$AA_hire_response <- as.factor(data2$AA_hire_response)
+data2$AA_hire_response <- relevel(data2$AA_hire_response, ref = "3")
+
+data2$AA_educ_response <- as.factor(data2$AA_educ_response)
+data2$AA_educ_response <- relevel(data2$AA_educ_response, ref = "5")
+
+# Define survey design
+library(survey)
+naas_full_design <- svydesign(
+  ids = ~1, 
+  strata = ~ETHNICALPHA,       
+  weights = ~NWEIGHTNATIVITY,  
+  data = data2
+)
+
+# Subset the Asian Americans from the full design 
+asian_design <- subset(naas_full_design, RACE == 1)
+
+# Filter out the dataset with only Asian American respondents
+data3 <- data2 %>% filter(RACE == 1)
+
+```
+
+# 3, Descriptive Analysis
+
+```{r}
+demographic_vars <- c("AGE_CAT", "Q10_4A", "Q10_901_recode", "S7", "S8", "FORBORN", "S10_1_recode")
+
+for(var in demographic_vars) {
+  data3[[var]] <- as.factor(data3[[var]])
+  asian_design$variables[[var]] <- as.factor(asian_design$variables[[var]])
+}
+
+unweighted_proportions <- lapply(demographic_vars, function(var) {
+  prop.table(table(data3[[var]])) %>% round(3) 
+})
+
+library(srvyr)
+
+weighted_proportions <- lapply(demographic_vars, function(var) {
+  asian_design %>%
+    srvyr::as_survey() %>% # Converts the survey object 
+    group_by(across(all_of(var))) %>% 
+    summarize(
+      Weighted_Proportion = survey_mean(na.rm = TRUE)
+    ) %>%
+    mutate(across(c(Weighted_Proportion, Weighted_Proportion_se), round, 3))
+})
+
+weighted_proportions[[7]]
+```
+
+# 4, Bivariate Analysis
+
+```{r}
+discrimination_vars <- c("Q5_1_B", "Q5_1_C", "Q5_1_D", "Q5_1_E", "Q5_1_G", "Q5_1_H", "Q5_1_I", "Q5_1_J", "Q5_1_K")
+aa_vars             <- c("AA_hire_response", "AA_educ_response")
+
+srvyr_design <- as_survey(asian_design)
+
+bivariate_discrimination <- lapply(discrimination_vars, function(var) {
+  srvyr_design %>%
+    # Group by interviewer race and the specific discrimination variable
+    group_by(int_race, across(all_of(var))) %>%
+    summarize(
+      Weighted_Prop = survey_mean(na.rm = TRUE)
+    ) %>%
+    mutate(
+      Variable = var,
+      across(c(Weighted_Prop, Weighted_Prop_se), round, 3)
+    )
+})
+
+bivariate_discrimination[[9]]
+```
+
+```{r}
+bivariate_aa <- lapply(aa_vars, function(var) {
+  srvyr_design %>%
+    # Group by interviewer race and the specific AA response variable
+    group_by(int_race, across(all_of(var))) %>%
+    summarize(
+      Weighted_Prop = survey_mean(na.rm = TRUE)
+    ) %>%
+    mutate(
+      Variable = var,
+      across(c(Weighted_Prop, Weighted_Prop_se), round, 3)
+    )
+})
+
+bivariate_aa[[2]]
+```
+
+```{r}
+# Conduct Rao-Scott Chi-Square tests 
+rs_discrimination_results <- lapply(discrimination_vars, function(var) {
+  # Create the formula dynamically (e.g., ~Q5_1_B + int_race)
+  form <- as.formula(paste0("~", var, " + int_race"))
+  
+  # Run the Rao-Scott Chi-Square test (statistic = "F" is the standard Rao-Scott second-order correction)
+  test_output <- svychisq(form, design = asian_design, statistic = "F")
+  
+  # Extract relevant statistics into a clean dataframe
+  data.frame(
+    Variable = var,
+    F_Statistic = round(test_output$statistic, 3),
+    df_num = test_output$parameter[1],
+    df_den = round(test_output$parameter[2], 1),
+    p_value = round(test_output$p.value, 4)
+  )
+})
+
+discrimination_chisq_table <- do.call(rbind, rs_discrimination_results)
+
+rs_aa_results <- lapply(aa_vars, function(var) {
+  form <- as.formula(paste0("~", var, " + int_race"))
+  test_output <- svychisq(form, design = asian_design, statistic = "F")
+  
+  data.frame(
+    Variable = var,
+    F_Statistic = round(test_output$statistic, 3),
+    df_num = test_output$parameter[1],
+    df_den = round(test_output$parameter[2], 1),
+    p_value = round(test_output$p.value, 4)
+  )
+})
+
+aa_chisq_table <- do.call(rbind, rs_aa_results)
+```
+
+# 5, Explore ROI Effects (Discrimination Experiences)
+
+```{r}
+data2 <- data2 %>%
+  mutate(
+    AGE_CAT        = as.factor(AGE_CAT),
+    Q10_4A         = as.factor(Q10_4A),         # Marital Status
+    Q10_901_recode = as.factor(Q10_901_recode), # Employment Status
+    S7             = as.factor(S7),             # Gender
+    S8             = as.factor(S8),             # Education level
+    S10_1_recode   = as.factor(S10_1_recode),   # 2-Category Ethnicity Cluster
+    FORBORN        = as.factor(FORBORN),        # Nativity
+    int_race       = as.factor(int_race),
+    int_race2      = as.factor(int_race2)
+  )
+
+data2$FORBORN      <- relevel(data2$FORBORN, ref = "0")      # Baseline: Native-born
+data2$S10_1_recode <- relevel(data2$S10_1_recode, ref = "1")  # Baseline: East/Southeast Asian
+
+naas_full_design <- svydesign(
+  ids = ~1, 
+  strata = ~ETHNICALPHA,       
+  weights = ~NWEIGHTNATIVITY,  
+  data = data2
+)
+
+asian_design <- subset(naas_full_design, RACE == 1)
+```
+
+```{r}
+model1 <- svyglm(Q5_1_B ~ int_race + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN, family = quasibinomial(), design = asian_design)
+model2 <- svyglm(Q5_1_C ~ int_race + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN, family = quasibinomial(), design = asian_design)
+model3 <- svyglm(Q5_1_D ~ int_race + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN, family = quasibinomial(), design = asian_design)
+model4 <- svyglm(Q5_1_E ~ int_race + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN, family = quasibinomial(), design = asian_design)
+model5 <- svyglm(Q5_1_G ~ int_race + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN, family = quasibinomial(), design = asian_design)
+model6 <- svyglm(Q5_1_H ~ int_race + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN, family = quasibinomial(), design = asian_design)
+model7 <- svyglm(Q5_1_I ~ int_race + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN, family = quasibinomial(), design = asian_design)
+model8 <- svyglm(Q5_1_J ~ int_race + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN, family = quasibinomial(), design = asian_design)
+model9 <- svyglm(Q5_1_K ~ int_race + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN, family = quasibinomial(), design = asian_design)
+
+summary(model9)
+
+length(model9$residuals)
+```
+
+```{r}
+### Convert the raw coefficients to odds ratios and combine nine model outputs into one table
+# Function to extract odds ratios and significance stars
+extract_or <- function(model) {
+  coef_est <- exp(coef(model)) # Exponentiate coefficients to get odds ratios
+  p_values <- summary(model)$coef[, 4] # Extract p-values
+  
+  # Add significance stars
+  significance <- ifelse(p_values < 0.001, "***", 
+                         ifelse(p_values < 0.01, "**", 
+                                ifelse(p_values < 0.05, "*", "")))
+  
+  # Combine odds ratio with significance stars
+  formatted_or <- sprintf("%.3f%s", coef_est, significance)
+  return(formatted_or)
+}
+
+# Function to calculate McFadden's R²
+calculate_pseudo_r2 <- function(model) {
+  null_model <- svyglm(formula = update(formula(model), . ~ 1), 
+                       design = model$survey.design, 
+                       family = quasibinomial())
+  return(round(1 - (logLik(model) / logLik(null_model)), 3))
+}
+
+# Function to calculate effective sample size
+calculate_ess <- function(model) {
+  return(summary(model)$df.residual + 1)
+}
+
+models <- list(model1, model2, model3, model4, model5, model6, model7, model8, model9)
+
+# Extract odds ratios for all models
+odds_ratios_list <- lapply(models, extract_or)
+odds_ratios_df <- do.call(cbind, odds_ratios_list)
+
+# Get variable names (row names from the first model)
+variable_names <- names(coef(models[[1]]))
+
+# Create a dataframe for odds ratios
+results_df <- data.frame(Variable = variable_names, odds_ratios_df)
+colnames(results_df) <- c("Variable", paste0("Model ", 1:9)) 
+
+# Calculate McFadden’s R² and effective sample size
+pseudo_r2_values <- sapply(models, calculate_pseudo_r2)
+effective_sample_sizes <- sapply(models, calculate_ess)
+
+pseudo_r2_values
+effective_sample_sizes
+
+# Create a dataframe for McFadden’s R² and ESS
+model_fit_df <- data.frame(
+  Variable = c("Effective Sample Size", "McFadden’s R²"),
+  rbind(effective_sample_sizes, pseudo_r2_values)
+)
+
+colnames(model_fit_df) <- c("Variable", paste0("Model ", 1:9))
+
+# Combine odds ratio table with model fit statistics
+model_fit_df <- model_fit_df %>% mutate(across(where(is.numeric), as.character)) # Convert model fit data to character
+final_table <- bind_rows(results_df, model_fit_df)
+
+# Rename the variable names in the table
+final_table <- final_table %>%
+  mutate(Variable = recode(Variable, 
+    "int_race" = "Interviewer Race (Asian)",
+    "AGE_CAT2" = "Age: 25-34",
+    "AGE_CAT3" = "Age: 35-49",
+    "AGE_CAT4" = "Age: 50-64",
+    "AGE_CAT5" = "Age: 65+",
+    "Q10_4A2" = "Marital Status: Widowed",
+    "Q10_4A3" = "Marital Status: Divorced",
+    "Q10_4A4" = "Marital Status: Separated",
+    "Q10_4A5" = "Marital Status: Never married",
+    "Q10_901_recode2" = "Employment: Currently unemployed",
+    "Q10_901_recode3" = "Employment: Student",
+    "Q10_901_recode4" = "Employment: Homemaker",
+    "Q10_901_recode5" = "Employment: Retired",
+    "Q10_901_recode6" = "Employment: Permanently disabled",
+    "S71" = "Gender: Male",
+    "S82" = "Education: Some Schooling",
+    "S83" = "Education: High School Graduate",
+    "S84" = "Education: Some College",
+    "S85" = "Education: Bachelor's Degree",
+    "S86" = "Education: Graduate Degree",
+    "S10_1_recode2" = "Ethnicity: South Asian",
+    "FORBORN1" = "Nativity: Foreign-born"
+  ))
+ final_table <- final_table %>%
+  rename(
+    "Received poorer service" = "Model 1",
+    "People assume you don't speak English" = "Model 2",
+    "People act afraid of you" = "Model 3",
+    "People assume you are dishonest" = "Model 4",
+    "Called names or insulted" = "Model 5",
+    "Threatened or harassed" = "Model 6",
+    "Name mispronounced" = "Model 7",
+    "Assumed good at math/science" = "Model 8",
+    "Assumed not creative" = "Model 9"
+  )
+ 
+
+```
+
+# 6, Exploring ROI Effects (Affirmative Action)
+
+```{r}
+library(svyVGAM)
+
+model10 <- svy_vglm(AA_educ_response ~ int_race2 + Q6_1_A + Q6_1_B + Q6_1_C + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN + AA_educ_ind, family = multinomial(), design = asian_design)
+
+summary(model10)
+
+model11 <- svy_vglm(AA_hire_response ~ int_race2 + Q6_1_A + Q6_1_B + Q6_1_C + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN + AA_hire_ind, family = multinomial(), design = asian_design)
+
+summary(model11)
+
+nrow(model10$X)
+```
+
+```{r}
+### Convert the raw coefficients to odds ratios and combine nine model outputs into one table
+raw_results <- coef(model11)
+
+# Compute odds ratios
+odds_ratios <- exp(raw_results)
+odds_ratios_df <- as.data.frame(odds_ratios)
+odds_ratios_df <- odds_ratios_df %>% 
+  mutate(across(1:1, ~ round(., 3)))
+odds_ratios_df_cleaned <- odds_ratios_df %>% 
+  rownames_to_column(var = "Variable") %>%  # If the row names contain variable information
+  separate(Variable, into = c("Variable", "Category"), sep = ":", fill = "right") %>%
+  pivot_wider(names_from = Category, values_from = odds_ratios)
+```
+
+# 7, Test the moderation effect of Q6_1_C
+
+```{r}
+model12 <- svy_vglm(AA_educ_response ~ int_race2*Q6_1_C + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN + AA_educ_ind, family = multinomial(), design = asian_design)
+
+summary(model12)
+
+model13 <- svy_vglm(AA_hire_response ~ int_race2*Q6_1_C + AGE_CAT + Q10_4A + Q10_901_recode + S7 + S8 + S10_1_recode + FORBORN + AA_hire_ind, family = multinomial(), design = asian_design)
+
+summary(model13)
+
+```
+
+```{r}
+raw_results <- coef(model13)
+raw_results <- as.data.frame(raw_results)
+raw_results <- raw_results %>% 
+  mutate(across(1:1, ~ round(., 3)))
+raw_results_cleaned <- raw_results %>% 
+  rownames_to_column(var = "Variable") %>%  # If the row names contain variable information
+  separate(Variable, into = c("Variable", "Category"), sep = ":", fill = "right") %>%
+  pivot_wider(names_from = Category, values_from = raw_results)
+  
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
